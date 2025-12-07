@@ -1,0 +1,798 @@
+# ============================================================================
+# SimFin Data Download Workflow
+# ============================================================================
+# 
+# PURPOSE:
+#   Automatically downloads financial data from SimFin API and commits it
+#   to a dedicated branch (data-update) for review and merging.
+#   
+#   The workflow performs the following operations:
+#   1. Downloads data to data-update branch with large files split for Git
+#   2. For non-main branches: Pushes split files to the main branch automatically
+#   3. For main branch: Pushes split files directly
+# 
+# SCHEDULE:
+#   Runs daily at 2 AM UTC (automatic)
+#   Can also be triggered manually via workflow_dispatch
+# 
+# REQUIRED SECRETS:
+#   1. SIMFIN_API_KEY (required)
+#      - Your SimFin API key for data access
+#      - Get it from: https://simfin.com/
+# 
+#   2. GIT_PAT (optional for public forks)
+#      - Personal Access Token with 'repo' and 'workflow' scopes
+#      - Only needed if pushing to a public fork
+#      - Setup instructions in the "Setup Personal Access Token" step below
+#      - Alternative: Use SSH_DEPLOY_KEY (see WORKFLOW_AUTHENTICATION_SETUP.md)
+# 
+# OPTIONAL CONFIGURATION:
+#   - DATA_BRANCH variable: Custom branch name (default: data-update)
+#   - USE_SSH_AUTH variable: Set to 'true' to use SSH instead of PAT
+# 
+# DOCUMENTATION:
+#   - Full setup guide: WORKFLOW_AUTHENTICATION_SETUP.md
+#   - Troubleshooting: WORKFLOW_FIX_DOCUMENTATION.md
+# 
+# ============================================================================
+
+name: Download SimFin Data
+
+# Run daily at 2 AM UTC
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  # Allow manual triggering for testing
+  workflow_dispatch:
+
+jobs:
+  download-data:
+    name: Download SimFin Financial Data
+    runs-on: ubuntu-latest
+    
+    # Grant write permissions to commit and push data changes
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Shallow clone to reduce checkout time and data transfer
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Verify stock_data directory
+        run: |
+          echo "Checking if stock_data directory exists..."
+          if [ ! -d "stock_data" ]; then
+            echo "stock_data directory does not exist. Creating it..."
+            mkdir -p stock_data
+            echo "✓ stock_data directory created"
+          else
+            echo "✓ stock_data directory already exists"
+          fi
+          ls -la stock_data/ || echo "Directory is empty"
+      
+      - name: Install dependencies
+        run: |
+          echo "Installing Python dependencies..."
+          python -m pip install --upgrade pip
+          pip install simfin
+          echo "✓ Dependencies installed successfully"
+      
+      - name: Download SimFin data
+        env:
+          SIMFIN_API_KEY: ${{ secrets.SIMFIN_API_KEY }}
+        run: |
+          echo "Starting SimFin data download..."
+          python scripts/download_simfin_data.py
+        continue-on-error: false
+      
+      - name: Verify downloaded data
+        run: |
+          echo "Verifying downloaded data files..."
+          echo "Contents of stock_data directory:"
+          ls -lh stock_data/ || echo "No files found in stock_data directory"
+          
+          # Count the number of files
+          file_count=$(find stock_data -type f -name "*.csv" 2>/dev/null | wc -l)
+          echo "Number of CSV files downloaded: $file_count"
+          
+          if [ "$file_count" -eq 0 ]; then
+            echo "⚠️ Warning: No CSV files were downloaded"
+            echo "Possible causes:"
+            echo "  - Invalid or missing SIMFIN_API_KEY secret"
+            echo "  - Network connectivity issues"
+            echo "  - SimFin API service unavailable"
+            echo "  - API rate limit exceeded"
+            exit 1
+          else
+            echo "✓ Download verification successful"
+          fi
+      
+      - name: Configure Git
+        run: |
+          echo "Configuring Git for automated commits..."
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Increase buffer size to handle large payloads (500MB)
+          git config --global http.postBuffer 524288000
+          
+          # Configure timeout settings for better reliability
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 120
+          
+          echo "✓ Git configured successfully"
+      
+      - name: Clean up intermediate files
+        run: |
+          echo "Cleaning up intermediate download files..."
+          
+          # Remove ZIP files - they are intermediate files that are not needed in version control
+          # The CSV files extracted from these ZIPs are the actual data we want to track
+          if [ -d "stock_data" ]; then
+            # Count ZIP files before removal
+            zip_count=$(find stock_data -type f -name "*.zip" 2>/dev/null | wc -l)
+            
+            if [ "$zip_count" -gt 0 ]; then
+              echo "Found $zip_count ZIP file(s) to remove"
+              find stock_data -type f -name "*.zip" -delete
+              echo "✓ ZIP files removed (CSV files retained)"
+            else
+              echo "No ZIP files found - nothing to clean up"
+            fi
+            
+            # Show what will be committed
+            echo ""
+            echo "Files that will be tracked in version control:"
+            find stock_data -type f -name "*.csv" 2>/dev/null | head -10 || echo "No CSV files found"
+          else
+            echo "⚠️ stock_data directory does not exist"
+          fi
+      
+      - name: Split large files
+        run: |
+          echo "Checking for files larger than GitHub's 100MB limit..."
+          
+          if [ -d "stock_data" ]; then
+            # Find CSV files larger than 90MB (conservative threshold)
+            large_files=$(find stock_data -type f -name "*.csv" -size +90M 2>/dev/null || true)
+            
+            if [ -n "$large_files" ]; then
+              echo "Found large files that exceed GitHub's limit:"
+              echo "$large_files"
+              echo ""
+              echo "Splitting large files into 50MB chunks..."
+              
+              for file in $large_files; do
+                filename=$(basename "$file")
+                dirname=$(dirname "$file")
+                
+                echo "Splitting $filename..."
+                
+                # Split file into 50MB chunks (52428800 bytes)
+                # -d uses numeric suffixes, -a 3 gives 3-digit suffixes (part000, part001, etc.)
+                # This creates files like: filename.csv.part000, filename.csv.part001, ...
+                # These can be reconstructed with: cat filename.csv.part* > filename.csv
+                split -b 50M -d -a 3 "$file" "${file}.part"
+                
+                # Remove the original large file
+                rm "$file"
+                
+                echo "✓ $filename split into chunks"
+              done
+              
+              echo ""
+              echo "Split files created:"
+              find stock_data -type f -name "*.part*" 2>/dev/null || echo "No split files found"
+            else
+              echo "✓ No files exceed the size limit - all files can be committed directly"
+            fi
+          else
+            echo "⚠️ stock_data directory does not exist"
+          fi
+      
+      - name: Check for changes
+        id: check_changes
+        run: |
+          echo "Checking for changes in stock_data directory..."
+          
+          # Verify directory exists before attempting git operations
+          if [ ! -d "stock_data" ]; then
+            echo "⚠️ stock_data directory does not exist"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          git add stock_data/
+          
+          if git diff --staged --quiet; then
+            echo "No changes detected in stock_data directory"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "✓ Changes detected in stock_data directory"
+            echo "Modified/added files:"
+            git diff --staged --name-status
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+      
+      # SSH DEPLOY KEY AUTHENTICATION (ALTERNATIVE TO PAT)
+      # ===================================================
+      # This step configures SSH-based authentication as an alternative to PAT.
+      # SSH keys are more secure for production use as they're repository-specific.
+      # 
+      # TO USE SSH AUTHENTICATION:
+      # 1. Create an SSH key pair (see WORKFLOW_AUTHENTICATION_SETUP.md)
+      # 2. Add public key as Deploy Key in repository settings (with write access)
+      # 3. Add private key as SSH_DEPLOY_KEY secret
+      # 4. Set USE_SSH_AUTH=true in repository variables
+      # 
+      # This step only runs if USE_SSH_AUTH variable is set to 'true'
+      # Otherwise, the workflow uses GIT_PAT (see "Setup Personal Access Token" step below)
+      # 
+      - name: Setup SSH Deploy Key (if available)
+        if: steps.check_changes.outputs.has_changes == 'true' && vars.USE_SSH_AUTH == 'true'
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_DEPLOY_KEY }}
+        run: |
+          if [ -n "$SSH_PRIVATE_KEY" ]; then
+            echo "✓ SSH_DEPLOY_KEY secret found"
+            echo "Setting up SSH authentication..."
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+            
+            # Add the private key
+            echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+            chmod 600 ~/.ssh/id_ed25519
+            
+            # Add GitHub to known hosts
+            ssh-keyscan github.com >> ~/.ssh/known_hosts
+            chmod 644 ~/.ssh/known_hosts
+            
+            # Configure Git to use SSH
+            git remote set-url origin git@github.com:${{ github.repository }}.git
+            
+            echo "✓ SSH authentication configured successfully"
+          else
+            echo "❌ ERROR: USE_SSH_AUTH is enabled but SSH_DEPLOY_KEY secret not found"
+            echo ""
+            echo "To fix this issue, choose one of these options:"
+            echo "  1. Add SSH_DEPLOY_KEY secret (see WORKFLOW_AUTHENTICATION_SETUP.md)"
+            echo "  2. Disable SSH authentication:"
+            echo "     → Go to: Repository Settings → Secrets and variables → Actions → Variables tab"
+            echo "     → Find 'USE_SSH_AUTH' and delete it (or set value to 'false')"
+            echo "     → Then add GIT_PAT secret instead"
+            echo ""
+            exit 1
+          fi
+      
+      - name: Commit changes
+        if: steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          echo "Committing changes to repository..."
+          current_date=$(date -u +"%Y-%m-%d %H:%M:%S")
+          
+          # Define the target branch for data updates
+          TARGET_BRANCH="${{ vars.DATA_BRANCH || 'data-update' }}"
+          CURRENT_BRANCH="${{ github.ref_name }}"
+          
+          echo "Current branch: $CURRENT_BRANCH"
+          echo "Target branch for data updates: $TARGET_BRANCH"
+          
+          # Create or checkout the data updates branch
+          if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
+            echo "Checking out existing branch: $TARGET_BRANCH"
+            git fetch origin "$TARGET_BRANCH"
+            # Use -B to create or reset the branch to track origin
+            git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+            # Merge changes from current branch
+            # Using -X theirs strategy: In case of conflicts, prefer incoming changes
+            # This is safe because we're merging automated data downloads
+            git merge --no-edit "$CURRENT_BRANCH" -X theirs || {
+              echo "⚠️ Merge conflict detected"
+              echo "Aborting merge and using current branch state"
+              git merge --abort
+              git checkout -B "$TARGET_BRANCH"
+            }
+          else
+            echo "Creating new branch: $TARGET_BRANCH"
+            git checkout -b "$TARGET_BRANCH"
+          fi
+          
+          # Commit the changes
+          git commit -m "chore: update SimFin data - $current_date UTC"
+          echo "✓ Changes committed successfully to branch: $TARGET_BRANCH"
+      
+      # AUTHENTICATION SETUP FOR GIT PUSH
+      # ====================================
+      # This step configures authentication for pushing changes to the repository.
+      # 
+      # WHY IS THIS NEEDED?
+      # - On public forks, the default GITHUB_TOKEN may have restrictions
+      # - Using a Personal Access Token (PAT) or SSH key provides more reliable authentication
+      # - The downloaded data files (~400MB+) require sufficient permissions to push
+      # 
+      # OPTIONAL: GIT_PAT SECRET
+      # ---------------------------
+      # If needed, create a Personal Access Token (PAT) with the following scopes:
+      #   ✓ repo (Full control of private repositories)
+      #   ✓ workflow (Update GitHub Action workflows)
+      # 
+      # HOW TO SET UP THE GIT_PAT SECRET:
+      # 1. Create a Personal Access Token:
+      #    - Go to: https://github.com/settings/tokens
+      #    - Click "Generate new token" → "Generate new token (classic)"
+      #    - Token name: "GitHub Actions Workflow Data Upload"
+      #    - Select scopes: ✓ repo, ✓ workflow
+      #    - Set expiration (recommended: 90 days)
+      #    - Click "Generate token" and COPY IT (you won't see it again!)
+      # 
+      # 2. Add the token as a repository secret:
+      #    - Go to: Repository Settings → Secrets and variables → Actions
+      #    - Click "New repository secret"
+      #    - Name: GIT_PAT
+      #    - Value: Paste your Personal Access Token
+      #    - Click "Add secret"
+      # 
+      # 3. Re-run this workflow
+      # 
+      # ALTERNATIVE: SSH Deploy Key (see WORKFLOW_AUTHENTICATION_SETUP.md)
+      # -------------------------------------------------------------------
+      # For enhanced security, you can use an SSH deploy key instead of PAT.
+      # Set USE_SSH_AUTH=true in repository variables and configure SSH_DEPLOY_KEY secret.
+      # See the "Setup SSH Deploy Key" step above for SSH configuration.
+      # 
+      - name: Setup Personal Access Token (if SSH not used)
+        if: steps.check_changes.outputs.has_changes == 'true' && vars.USE_SSH_AUTH != 'true'
+        env:
+          GIT_PAT: ${{ secrets.GIT_PAT }}
+        run: |
+          if [ -n "$GIT_PAT" ]; then
+            echo "✓ GIT_PAT secret found"
+            echo "Setting up Personal Access Token authentication..."
+            
+            # Configure Git to use the PAT for authentication
+            # Format: https://x-access-token:TOKEN@github.com/OWNER/REPO.git
+            # Note: GitHub automatically masks the token in logs for security
+            git remote set-url origin "https://x-access-token:${GIT_PAT}@github.com/${{ github.repository }}.git"
+            
+            echo "✓ Personal Access Token configured successfully"
+            echo "✓ Authentication ready for git push operations"
+          else
+            echo "⚠️ WARNING: GIT_PAT secret not found!"
+            echo ""
+            echo "The workflow will attempt to push using the default GITHUB_TOKEN."
+            echo "If push fails, you may need to configure GIT_PAT."
+            echo ""
+            echo "To set up GIT_PAT (if needed):"
+            echo "1. Create Personal Access Token at: https://github.com/settings/tokens"
+            echo "2. Select scopes: repo + workflow"
+            echo "3. Add as repository secret named 'GIT_PAT'"
+            echo ""
+            echo "Continuing with default authentication..."
+          fi
+      
+      # VALIDATE AUTHENTICATION BEFORE PUSH
+      # ====================================
+      # This step verifies that proper authentication is configured before attempting to push.
+      # It prevents wasting time on failed push attempts and provides clear error messages.
+      - name: Validate authentication setup
+        if: steps.check_changes.outputs.has_changes == 'true'
+        env:
+          GIT_PAT: ${{ secrets.GIT_PAT }}
+          SSH_DEPLOY_KEY: ${{ secrets.SSH_DEPLOY_KEY }}
+          USE_SSH: ${{ vars.USE_SSH_AUTH }}
+        run: |
+          echo "Validating authentication configuration..."
+          echo ""
+          
+          # Check if SSH authentication is configured
+          if [ "$USE_SSH" == "true" ]; then
+            if [ -n "$SSH_DEPLOY_KEY" ]; then
+              echo "✓ SSH Deploy Key authentication configured"
+              exit 0
+            else
+              # This should rarely happen as the SSH setup step would have failed earlier
+              echo "❌ ERROR: USE_SSH_AUTH is enabled but SSH_DEPLOY_KEY secret not found"
+              echo "The 'Setup SSH Deploy Key' step should have caught this earlier."
+              exit 1
+            fi
+          fi
+          
+          # Check if PAT authentication is configured
+          if [ -n "$GIT_PAT" ]; then
+            echo "✓ Personal Access Token (GIT_PAT) configured"
+            echo "✓ Ready to push with elevated permissions"
+            exit 0
+          fi
+          
+          # No valid authentication found
+          echo "❌ ERROR: No valid authentication configured!"
+          echo ""
+          echo "This workflow requires either:"
+          echo "  1. GIT_PAT secret (recommended for public forks)"
+          echo "  2. SSH_DEPLOY_KEY secret + USE_SSH_AUTH=true variable"
+          echo ""
+          echo "The default GITHUB_TOKEN cannot push Git LFS data to public forks."
+          echo "See the 'Setup Personal Access Token' step above for setup instructions."
+          echo ""
+          exit 1
+      
+      - name: Push changes
+        if: steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          echo "Pushing changes to remote repository..."
+          
+          # Get the target branch name
+          TARGET_BRANCH="${{ vars.DATA_BRANCH || 'data-update' }}"
+          
+          # Display what will be pushed
+          echo ""
+          echo "Files to be pushed:"
+          git diff --stat HEAD~1 2>/dev/null || git diff --stat --cached || echo "No diff available"
+          echo ""
+          
+          # Push with retry logic to handle transient network issues
+          max_attempts=3
+          attempt=1
+          # Use unique temp file to avoid conflicts with concurrent runs
+          push_error_log="/tmp/git_push_error_${{ github.run_id }}.log"
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "Push attempt $attempt of $max_attempts..."
+            echo "Pushing to branch: $TARGET_BRANCH"
+            
+            # Ensure we have the latest changes from remote before pushing
+            # This prevents "git pull" errors when remote has new commits
+            echo "Fetching latest changes from remote..."
+            if git fetch origin "$TARGET_BRANCH" 2>&1 | tee -a "$push_error_log"; then
+              echo "✓ Fetched latest changes from remote"
+              
+              # Check if remote branch has new commits we don't have locally
+              LOCAL_COMMIT=$(git rev-parse HEAD)
+              REMOTE_COMMIT=$(git rev-parse "origin/$TARGET_BRANCH" 2>/dev/null || echo "")
+              
+              if [ -n "$REMOTE_COMMIT" ] && [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
+                echo "⚠️ Remote branch has new commits. Rebasing local changes..."
+                
+                # Rebase our changes on top of remote changes
+                # This ensures our commit is on top of any concurrent workflow commits
+                if git rebase "origin/$TARGET_BRANCH" 2>&1 | tee -a "$push_error_log"; then
+                  echo "✓ Successfully rebased local changes on remote"
+                else
+                  rebase_exit_code=$?
+                  echo "⚠️ Rebase failed with exit code: $rebase_exit_code"
+                  echo "Attempting to resolve conflicts automatically..."
+                  
+                  # For data files, we can use 'ours' strategy (keep our version)
+                  # since automated data downloads should overwrite old data
+                  git checkout --ours stock_data/ 2>/dev/null || true
+                  git add stock_data/ 2>/dev/null || true
+                  
+                  # Try to continue rebase
+                  if git rebase --continue 2>&1 | tee -a "$push_error_log"; then
+                    echo "✓ Conflicts resolved, rebase completed"
+                  else
+                    echo "❌ Cannot automatically resolve conflicts"
+                    echo "Aborting rebase and using force push..."
+                    git rebase --abort
+                    
+                    # As a fallback, force push (safe for data branch)
+                    echo "Using force push to overwrite remote branch..."
+                    if git push --force-with-lease origin "$TARGET_BRANCH" 2>&1 | tee -a "$push_error_log"; then
+                      echo "✓ Changes force-pushed successfully to branch: $TARGET_BRANCH"
+                      echo ""
+                      echo "Summary:"
+                      echo "  - Data downloaded and committed"
+                      echo "  - Branch: $TARGET_BRANCH"
+                      echo "  - Commit: $(git rev-parse HEAD)"
+                      echo "  - Method: Force push (with lease)"
+                      echo ""
+                      echo "📝 Note: Changes are on the '$TARGET_BRANCH' branch"
+                      echo "   You can review and merge these changes into your main branch when ready."
+                      break  # Exit the retry loop successfully
+                    else
+                      echo "❌ Force push also failed"
+                      # Continue to retry logic below
+                    fi
+                  fi
+                fi
+              else
+                echo "✓ Local branch is up-to-date with remote"
+              fi
+            else
+              echo "⚠️ Failed to fetch from remote (branch may not exist yet)"
+            fi
+            
+            # Push commits to the data update branch
+            # Capture both stdout and stderr for better error diagnosis
+            if git push origin "$TARGET_BRANCH" 2>&1 | tee -a "$push_error_log"; then
+              echo "✓ Changes pushed successfully to branch: $TARGET_BRANCH"
+              echo ""
+              echo "Summary:"
+              echo "  - Data downloaded and committed"
+              echo "  - Branch: $TARGET_BRANCH"
+              echo "  - Commit: $(git rev-parse HEAD)"
+              echo ""
+              echo "📝 Note: Changes are on the '$TARGET_BRANCH' branch"
+              echo "   You can review and merge these changes into your main branch when ready."
+              
+              break  # Exit retry loop successfully
+            else
+              # Capture the exit code
+              push_exit_code=$?
+              echo "⚠️ Push attempt $attempt failed with exit code: $push_exit_code"
+              
+              if [ $attempt -lt $max_attempts ]; then
+                wait_time=$((attempt * 10))
+                echo "Waiting ${wait_time} seconds before retry..."
+                sleep $wait_time
+                attempt=$((attempt + 1))
+              else
+                echo "❌ Failed to push changes after $max_attempts attempts"
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  PUSH FAILED: AUTHENTICATION OR NETWORK ISSUE"
+                echo "═══════════════════════════════════════════════════════════════"
+                echo ""
+                echo "Error details from git push:"
+                cat "$push_error_log" 2>/dev/null || echo "No error log available"
+                echo ""
+                echo "Common causes:"
+                echo "  • Missing or invalid GIT_PAT secret"
+                echo "  • PAT lacks required scopes (repo, workflow)"
+                echo "  • PAT has expired"
+                echo "  • Network connectivity issues"
+                echo "  • Large file size exceeds GitHub limits (100MB per file)"
+                echo "  • Branch protection rules blocking push"
+                echo "  • Remote branch updated by concurrent workflow run (use git pull)"
+                echo ""
+                echo "SOLUTION:"
+                echo "----------"
+                echo "1. Verify GIT_PAT secret exists:"
+                echo "   → Repository Settings → Secrets and variables → Actions"
+                echo "   → Should see 'GIT_PAT' in the list"
+                echo ""
+                echo "2. If missing, create a new Personal Access Token:"
+                echo "   → Visit: https://github.com/settings/tokens"
+                echo "   → Generate new token (classic)"
+                echo "   → Select scopes: ✓ repo, ✓ workflow"
+                echo "   → Add as GIT_PAT secret in repository settings"
+                echo ""
+                echo "3. If exists but failing, check:"
+                echo "   → Token hasn't expired (check expiration date)"
+                echo "   → Token has 'repo' and 'workflow' scopes"
+                echo "   → No typos when copying/pasting the token"
+                echo ""
+                echo "For detailed setup instructions:"
+                echo "  → See: WORKFLOW_AUTHENTICATION_SETUP.md in this repository"
+                echo ""
+                echo "Alternative: Use SSH Deploy Key"
+                echo "  → See: WORKFLOW_AUTHENTICATION_SETUP.md (Method 1)"
+                echo "═══════════════════════════════════════════════════════════════"
+                echo ""
+                exit 1
+              fi
+            fi
+          done
+      
+      - name: Push split files to main branch
+        if: steps.check_changes.outputs.has_changes == 'true'
+        env:
+          GIT_PAT: ${{ secrets.GIT_PAT }}
+        run: |
+          DATA_BRANCH="${{ vars.DATA_BRANCH || 'data-update' }}"
+          
+          # If we're already on the main branch, skip this step
+          # (files were already committed and pushed to main in the earlier "Push changes" step)
+          if [ "$DATA_BRANCH" == "main" ]; then
+            echo "Already on main branch - split files were pushed directly in previous step"
+            echo "Skipping separate push to main branch"
+            exit 0
+          fi
+          
+          echo "Preparing to push split files to main branch..."
+          
+          # Create a temporary directory for data files
+          TEMP_DIR="/tmp/csv_files"
+          mkdir -p "$TEMP_DIR"
+          
+          # Copy all CSV files (including split files) to temp directory
+          echo "Copying all data files to temporary directory..."
+          find stock_data -type f \( -name "*.csv" -o -name "*.part*" \) -exec cp {} "$TEMP_DIR/" \; 2>/dev/null || true
+          
+          # Count the files copied
+          file_count=$(find "$TEMP_DIR" -type f 2>/dev/null | wc -l)
+          echo "Number of files to push: $file_count"
+          
+          if [ "$file_count" -eq 0 ]; then
+            echo "⚠️ No data files found - skipping main branch push"
+            exit 0
+          fi
+          
+          # Fetch and checkout main branch
+          echo "Fetching main branch from remote..."
+          git fetch origin main || {
+            echo "⚠️ Main branch does not exist yet. Creating it..."
+            git checkout -b main
+            git push origin main
+            git fetch origin main
+          }
+          
+          echo "Checking out main branch..."
+          # Clean up any merge/rebase state before checkout to avoid "needs merge" errors
+          # This can happen if the workflow file itself was modified in different branches
+          echo "Cleaning up any conflicted state..."
+          
+          # Abort any ongoing merge operations
+          if git merge --abort 2>/dev/null; then
+            echo "✓ Aborted ongoing merge operation"
+          fi
+          
+          # Abort any ongoing rebase operations
+          if git rebase --abort 2>/dev/null; then
+            echo "✓ Aborted ongoing rebase operation"
+          fi
+          
+          # Reset to clean state
+          echo "Resetting to clean state..."
+          git reset --hard HEAD
+          
+          # Remove untracked files - safe here because:
+          # 1. We're about to checkout main branch anyway (discarding current branch state)
+          # 2. All important files are already tracked or will be recreated
+          # 3. This step runs after data is already committed to data-update branch
+          git clean -fd
+          echo "✓ Cleaned up conflicted state"
+          
+          git checkout main
+          
+          # Ensure stock_data directory exists on main branch
+          mkdir -p stock_data
+          
+          # Copy all data files to stock_data directory on main branch
+          echo "Copying all data files to main branch stock_data directory..."
+          if [ "$file_count" -gt 0 ]; then
+            find "$TEMP_DIR" -type f -exec cp {} stock_data/ \; || {
+              echo "❌ Failed to copy files to stock_data directory"
+              exit 1
+            }
+            echo "✓ Copied $file_count data files to stock_data directory"
+          else
+            echo "⚠️ No files to copy"
+          fi
+          
+          # Check if there are changes to commit
+          git add stock_data/
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit on main branch (files already up-to-date)"
+          else
+            echo "Changes detected in stock_data directory on main branch"
+            echo "Modified/added files:"
+            git diff --staged --name-status
+            
+            # Commit the changes
+            current_date=$(date -u +"%Y-%m-%d %H:%M:%S")
+            git commit -m "chore: update data files (including split files) - $current_date UTC"
+            echo "✓ Changes committed to main branch"
+            
+            # Push to main branch
+            echo "Pushing data files to main branch..."
+            
+            # Configure authentication if GIT_PAT is available
+            if [ -n "$GIT_PAT" ]; then
+              git remote set-url origin "https://x-access-token:${GIT_PAT}@github.com/${{ github.repository }}.git"
+            fi
+            
+            # Push with retry logic
+            max_attempts=3
+            attempt=1
+            
+            while [ $attempt -le $max_attempts ]; do
+              echo "Push attempt $attempt of $max_attempts to main branch..."
+              
+              if git push origin main; then
+                echo "✓ Data files pushed successfully to main branch"
+                echo ""
+                echo "Summary:"
+                echo "  - Data files (including split files) committed to main branch"
+                echo "  - Files updated: $file_count"
+                echo "  - Branch: main"
+                echo "  - Commit: $(git rev-parse HEAD)"
+                break
+              else
+                push_exit_code=$?
+                echo "⚠️ Push attempt $attempt failed with exit code: $push_exit_code"
+                
+                if [ $attempt -lt $max_attempts ]; then
+                  wait_time=$((attempt * 10))
+                  echo "Waiting ${wait_time} seconds before retry..."
+                  sleep $wait_time
+                  attempt=$((attempt + 1))
+                else
+                  echo "❌ Failed to push to main branch after $max_attempts attempts"
+                  echo ""
+                  echo "Note: Split files were still pushed to $DATA_BRANCH branch successfully"
+                  exit 1
+                fi
+              fi
+            done
+          fi
+          
+          # Clean up temporary directory
+          echo "Cleaning up temporary files..."
+          rm -rf "$TEMP_DIR"
+          
+          # Switch back to data branch
+          echo "Switching back to $DATA_BRANCH branch..."
+          git checkout "$DATA_BRANCH"
+      
+      - name: Upload data as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simfin-data-${{ github.run_number }}
+          path: stock_data/
+          retention-days: 30
+      
+      - name: Summary
+        if: always()
+        run: |
+          # Get the target branch name
+          TARGET_BRANCH="${{ vars.DATA_BRANCH || 'data-update' }}"
+          
+          echo "## SimFin Data Download Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow Run:** #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "**Source Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Branch:** $TARGET_BRANCH" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -d "stock_data" ]; then
+            echo "### Downloaded Files" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            ls -lh stock_data/ 2>/dev/null || echo "No files" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ stock_data directory not found" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Add commit status information
+          if [ "${{ steps.check_changes.outputs.has_changes }}" == "true" ]; then
+            echo "### Git Status" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Changes committed and pushed to repository**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Data Update Branch:** \`$TARGET_BRANCH\`" >> $GITHUB_STEP_SUMMARY
+            if [ "$TARGET_BRANCH" == "main" ]; then
+              echo "- Split files committed directly" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- Split files committed for Git compatibility" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+            if [ "$TARGET_BRANCH" != "main" ]; then
+              echo "**Main Branch:** \`main\`" >> $GITHUB_STEP_SUMMARY
+              echo "- Split files pushed automatically" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "Latest commit: \`$(git rev-parse --short HEAD)\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Authentication Method" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ vars.USE_SSH_AUTH }}" == "true" ]; then
+              echo "🔐 SSH Deploy Key (more secure)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "🔑 Personal Access Token or GITHUB_TOKEN" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "### Git Status" >> $GITHUB_STEP_SUMMARY
+            echo "ℹ️ No changes detected (data already up-to-date)" >> $GITHUB_STEP_SUMMARY
+          fi
