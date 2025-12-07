@@ -1,24 +1,24 @@
 # ============================================================================
-# SimFin Data Download Workflow
+# CoinMarketCap Data Download Workflow
 # ============================================================================
 # 
 # PURPOSE:
-#   Automatically downloads financial data from SimFin API and commits it
+#   Automatically downloads cryptocurrency data from CoinMarketCap API and commits it
 #   to a dedicated branch (data-update) for review and merging.
 #   
 #   The workflow performs the following operations:
-#   1. Downloads data to data-update branch with large files split for Git
-#   2. For non-main branches: Pushes split files to the main branch automatically
-#   3. For main branch: Pushes split files directly
+#   1. Downloads top 50 cryptocurrencies by market cap to data-update branch
+#   2. For non-main branches: Pushes data files to the main branch automatically
+#   3. For main branch: Pushes data files directly
 # 
 # SCHEDULE:
 #   Runs daily at 2 AM UTC (automatic)
 #   Can also be triggered manually via workflow_dispatch
 # 
 # REQUIRED SECRETS:
-#   1. SIMFIN_API_KEY (required)
-#      - Your SimFin API key for data access
-#      - Get it from: https://simfin.com/
+#   1. COINMARKETCAP_API_KEY (required)
+#      - Your CoinMarketCap API key for data access
+#      - Get it from: https://coinmarketcap.com/api/
 # 
 #   2. GIT_PAT (optional for public forks)
 #      - Personal Access Token with 'repo' and 'workflow' scopes
@@ -36,7 +36,7 @@
 # 
 # ============================================================================
 
-name: Download SimFin Data
+name: Download CoinMarketCap Data
 
 # Run daily at 2 AM UTC
 on:
@@ -47,7 +47,7 @@ on:
 
 jobs:
   download-data:
-    name: Download SimFin Financial Data
+    name: Download CoinMarketCap Cryptocurrency Data
     runs-on: ubuntu-latest
     
     # Grant write permissions to commit and push data changes
@@ -66,49 +66,49 @@ jobs:
         with:
           python-version: '3.12'
       
-      - name: Verify stock_data directory
+      - name: Verify crypto_data directory
         run: |
-          echo "Checking if stock_data directory exists..."
-          if [ ! -d "stock_data" ]; then
-            echo "stock_data directory does not exist. Creating it..."
-            mkdir -p stock_data
-            echo "✓ stock_data directory created"
+          echo "Checking if crypto_data directory exists..."
+          if [ ! -d "crypto_data" ]; then
+            echo "crypto_data directory does not exist. Creating it..."
+            mkdir -p crypto_data
+            echo "✓ crypto_data directory created"
           else
-            echo "✓ stock_data directory already exists"
+            echo "✓ crypto_data directory already exists"
           fi
-          ls -la stock_data/ || echo "Directory is empty"
+          ls -la crypto_data/ || echo "Directory is empty"
       
       - name: Install dependencies
         run: |
           echo "Installing Python dependencies..."
           python -m pip install --upgrade pip
-          pip install simfin
+          pip install requests
           echo "✓ Dependencies installed successfully"
       
-      - name: Download SimFin data
+      - name: Download CoinMarketCap data
         env:
-          SIMFIN_API_KEY: ${{ secrets.SIMFIN_API_KEY }}
+          COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
         run: |
-          echo "Starting SimFin data download..."
-          python scripts/download_simfin_data.py
+          echo "Starting CoinMarketCap data download..."
+          python scripts/download_coinmarketcap_data.py
         continue-on-error: false
       
       - name: Verify downloaded data
         run: |
           echo "Verifying downloaded data files..."
-          echo "Contents of stock_data directory:"
-          ls -lh stock_data/ || echo "No files found in stock_data directory"
+          echo "Contents of crypto_data directory:"
+          ls -lh crypto_data/ || echo "No files found in crypto_data directory"
           
           # Count the number of files
-          file_count=$(find stock_data -type f -name "*.csv" 2>/dev/null | wc -l)
+          file_count=$(find crypto_data -type f -name "*.csv" 2>/dev/null | wc -l)
           echo "Number of CSV files downloaded: $file_count"
           
           if [ "$file_count" -eq 0 ]; then
             echo "⚠️ Warning: No CSV files were downloaded"
             echo "Possible causes:"
-            echo "  - Invalid or missing SIMFIN_API_KEY secret"
+            echo "  - Invalid or missing COINMARKETCAP_API_KEY secret"
             echo "  - Network connectivity issues"
-            echo "  - SimFin API service unavailable"
+            echo "  - CoinMarketCap API service unavailable"
             echo "  - API rate limit exceeded"
             exit 1
           else
@@ -136,13 +136,13 @@ jobs:
           
           # Remove ZIP files - they are intermediate files that are not needed in version control
           # The CSV files extracted from these ZIPs are the actual data we want to track
-          if [ -d "stock_data" ]; then
+          if [ -d "crypto_data" ]; then
             # Count ZIP files before removal
-            zip_count=$(find stock_data -type f -name "*.zip" 2>/dev/null | wc -l)
+            zip_count=$(find crypto_data -type f -name "*.zip" 2>/dev/null | wc -l)
             
             if [ "$zip_count" -gt 0 ]; then
               echo "Found $zip_count ZIP file(s) to remove"
-              find stock_data -type f -name "*.zip" -delete
+              find crypto_data -type f -name "*.zip" -delete
               echo "✓ ZIP files removed (CSV files retained)"
             else
               echo "No ZIP files found - nothing to clean up"
@@ -151,18 +151,18 @@ jobs:
             # Show what will be committed
             echo ""
             echo "Files that will be tracked in version control:"
-            find stock_data -type f -name "*.csv" 2>/dev/null | head -10 || echo "No CSV files found"
+            find crypto_data -type f -name "*.csv" 2>/dev/null | head -10 || echo "No CSV files found"
           else
-            echo "⚠️ stock_data directory does not exist"
+            echo "⚠️ crypto_data directory does not exist"
           fi
       
       - name: Split large files
         run: |
           echo "Checking for files larger than GitHub's 100MB limit..."
           
-          if [ -d "stock_data" ]; then
+          if [ -d "crypto_data" ]; then
             # Find CSV files larger than 90MB (conservative threshold)
-            large_files=$(find stock_data -type f -name "*.csv" -size +90M 2>/dev/null || true)
+            large_files=$(find crypto_data -type f -name "*.csv" -size +90M 2>/dev/null || true)
             
             if [ -n "$large_files" ]; then
               echo "Found large files that exceed GitHub's limit:"
@@ -190,33 +190,33 @@ jobs:
               
               echo ""
               echo "Split files created:"
-              find stock_data -type f -name "*.part*" 2>/dev/null || echo "No split files found"
+              find crypto_data -type f -name "*.part*" 2>/dev/null || echo "No split files found"
             else
               echo "✓ No files exceed the size limit - all files can be committed directly"
             fi
           else
-            echo "⚠️ stock_data directory does not exist"
+            echo "⚠️ crypto_data directory does not exist"
           fi
       
       - name: Check for changes
         id: check_changes
         run: |
-          echo "Checking for changes in stock_data directory..."
+          echo "Checking for changes in crypto_data directory..."
           
           # Verify directory exists before attempting git operations
-          if [ ! -d "stock_data" ]; then
-            echo "⚠️ stock_data directory does not exist"
+          if [ ! -d "crypto_data" ]; then
+            echo "⚠️ crypto_data directory does not exist"
             echo "has_changes=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          git add stock_data/
+          git add crypto_data/
           
           if git diff --staged --quiet; then
-            echo "No changes detected in stock_data directory"
+            echo "No changes detected in crypto_data directory"
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "✓ Changes detected in stock_data directory"
+            echo "✓ Changes detected in crypto_data directory"
             echo "Modified/added files:"
             git diff --staged --name-status
             echo "has_changes=true" >> $GITHUB_OUTPUT
@@ -306,7 +306,7 @@ jobs:
           fi
           
           # Commit the changes
-          git commit -m "chore: update SimFin data - $current_date UTC"
+          git commit -m "chore: update CoinMarketCap data - $current_date UTC"
           echo "✓ Changes committed successfully to branch: $TARGET_BRANCH"
       
       # AUTHENTICATION SETUP FOR GIT PUSH
@@ -472,8 +472,8 @@ jobs:
                   
                   # For data files, we can use 'ours' strategy (keep our version)
                   # since automated data downloads should overwrite old data
-                  git checkout --ours stock_data/ 2>/dev/null || true
-                  git add stock_data/ 2>/dev/null || true
+                  git checkout --ours crypto_data/ 2>/dev/null || true
+                  git add crypto_data/ 2>/dev/null || true
                   
                   # Try to continue rebase
                   if git rebase --continue 2>&1 | tee -a "$push_error_log"; then
@@ -605,7 +605,7 @@ jobs:
           
           # Copy all CSV files (including split files) to temp directory
           echo "Copying all data files to temporary directory..."
-          find stock_data -type f \( -name "*.csv" -o -name "*.part*" \) -exec cp {} "$TEMP_DIR/" \; 2>/dev/null || true
+          find crypto_data -type f \( -name "*.csv" -o -name "*.part*" \) -exec cp {} "$TEMP_DIR/" \; 2>/dev/null || true
           
           # Count the files copied
           file_count=$(find "$TEMP_DIR" -type f 2>/dev/null | wc -l)
@@ -653,23 +653,23 @@ jobs:
           
           git checkout main
           
-          # Ensure stock_data directory exists on main branch
-          mkdir -p stock_data
+          # Ensure crypto_data directory exists on main branch
+          mkdir -p crypto_data
           
-          # Copy all data files to stock_data directory on main branch
-          echo "Copying all data files to main branch stock_data directory..."
+          # Copy all data files to crypto_data directory on main branch
+          echo "Copying all data files to main branch crypto_data directory..."
           if [ "$file_count" -gt 0 ]; then
-            find "$TEMP_DIR" -type f -exec cp {} stock_data/ \; || {
-              echo "❌ Failed to copy files to stock_data directory"
+            find "$TEMP_DIR" -type f -exec cp {} crypto_data/ \; || {
+              echo "❌ Failed to copy files to crypto_data directory"
               exit 1
             }
-            echo "✓ Copied $file_count data files to stock_data directory"
+            echo "✓ Copied $file_count data files to crypto_data directory"
           else
             echo "⚠️ No files to copy"
           fi
           
           # Check if there are changes to commit
-          git add stock_data/
+          git add crypto_data/
           
           if git diff --staged --quiet; then
             echo "No changes to commit on main branch (files already up-to-date)"
@@ -738,8 +738,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: simfin-data-${{ github.run_number }}
-          path: stock_data/
+          name: coinmarketcap-data-${{ github.run_number }}
+          path: crypto_data/
           retention-days: 30
       
       - name: Summary
@@ -748,7 +748,7 @@ jobs:
           # Get the target branch name
           TARGET_BRANCH="${{ vars.DATA_BRANCH || 'data-update' }}"
           
-          echo "## SimFin Data Download Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## CoinMarketCap Data Download Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Workflow Run:** #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
           echo "**Date:** $(date -u)" >> $GITHUB_STEP_SUMMARY
@@ -756,14 +756,14 @@ jobs:
           echo "**Target Branch:** $TARGET_BRANCH" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -d "stock_data" ]; then
+          if [ -d "crypto_data" ]; then
             echo "### Downloaded Files" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            ls -lh stock_data/ 2>/dev/null || echo "No files" >> $GITHUB_STEP_SUMMARY
+            ls -lh crypto_data/ 2>/dev/null || echo "No files" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ stock_data directory not found" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ crypto_data directory not found" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
           
