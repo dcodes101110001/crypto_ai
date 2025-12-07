@@ -674,7 +674,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit on main branch (files already up-to-date)"
           else
-            echo "Changes detected in stock_data directory on main branch"
+            echo "Changes detected in crypto_data directory on main branch"
             echo "Modified/added files:"
             git diff --staged --name-status
             

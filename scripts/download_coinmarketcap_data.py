@@ -148,6 +148,47 @@ def download_with_retry(api_key, url, params, max_retries=5, initial_delay=2, ma
     raise last_exception
 
 
+def create_csv_row(crypto, idx):
+    """
+    Create a CSV row dictionary from cryptocurrency data.
+    
+    Args:
+        crypto: Cryptocurrency data dictionary from API response
+        idx: Rank/index of the cryptocurrency
+        
+    Returns:
+        Dictionary with formatted CSV row data
+    """
+    quote_usd = crypto.get('quote', {}).get('USD', {})
+    
+    return {
+        'rank': idx,
+        'id': crypto.get('id'),
+        'name': crypto.get('name'),
+        'symbol': crypto.get('symbol'),
+        'slug': crypto.get('slug'),
+        'num_market_pairs': crypto.get('num_market_pairs'),
+        'date_added': crypto.get('date_added'),
+        'max_supply': crypto.get('max_supply'),
+        'circulating_supply': crypto.get('circulating_supply'),
+        'total_supply': crypto.get('total_supply'),
+        'cmc_rank': crypto.get('cmc_rank'),
+        'last_updated': crypto.get('last_updated'),
+        'price_usd': quote_usd.get('price'),
+        'volume_24h_usd': quote_usd.get('volume_24h'),
+        'volume_change_24h': quote_usd.get('volume_change_24h'),
+        'percent_change_1h': quote_usd.get('percent_change_1h'),
+        'percent_change_24h': quote_usd.get('percent_change_24h'),
+        'percent_change_7d': quote_usd.get('percent_change_7d'),
+        'percent_change_30d': quote_usd.get('percent_change_30d'),
+        'percent_change_60d': quote_usd.get('percent_change_60d'),
+        'percent_change_90d': quote_usd.get('percent_change_90d'),
+        'market_cap_usd': quote_usd.get('market_cap'),
+        'market_cap_dominance': quote_usd.get('market_cap_dominance'),
+        'fully_diluted_market_cap': quote_usd.get('fully_diluted_market_cap'),
+    }
+
+
 def save_to_csv(data, data_dir):
     """
     Save cryptocurrency data to CSV file.
@@ -203,35 +244,7 @@ def save_to_csv(data, data_dir):
         writer.writeheader()
         
         for idx, crypto in enumerate(crypto_list, 1):
-            quote_usd = crypto.get('quote', {}).get('USD', {})
-            
-            row = {
-                'rank': idx,
-                'id': crypto.get('id'),
-                'name': crypto.get('name'),
-                'symbol': crypto.get('symbol'),
-                'slug': crypto.get('slug'),
-                'num_market_pairs': crypto.get('num_market_pairs'),
-                'date_added': crypto.get('date_added'),
-                'max_supply': crypto.get('max_supply'),
-                'circulating_supply': crypto.get('circulating_supply'),
-                'total_supply': crypto.get('total_supply'),
-                'cmc_rank': crypto.get('cmc_rank'),
-                'last_updated': crypto.get('last_updated'),
-                'price_usd': quote_usd.get('price'),
-                'volume_24h_usd': quote_usd.get('volume_24h'),
-                'volume_change_24h': quote_usd.get('volume_change_24h'),
-                'percent_change_1h': quote_usd.get('percent_change_1h'),
-                'percent_change_24h': quote_usd.get('percent_change_24h'),
-                'percent_change_7d': quote_usd.get('percent_change_7d'),
-                'percent_change_30d': quote_usd.get('percent_change_30d'),
-                'percent_change_60d': quote_usd.get('percent_change_60d'),
-                'percent_change_90d': quote_usd.get('percent_change_90d'),
-                'market_cap_usd': quote_usd.get('market_cap'),
-                'market_cap_dominance': quote_usd.get('market_cap_dominance'),
-                'fully_diluted_market_cap': quote_usd.get('fully_diluted_market_cap'),
-            }
-            
+            row = create_csv_row(crypto, idx)
             writer.writerow(row)
     
     logger.info(f"✓ Data saved to {filepath}")
@@ -243,35 +256,7 @@ def save_to_csv(data, data_dir):
         writer.writeheader()
         
         for idx, crypto in enumerate(crypto_list, 1):
-            quote_usd = crypto.get('quote', {}).get('USD', {})
-            
-            row = {
-                'rank': idx,
-                'id': crypto.get('id'),
-                'name': crypto.get('name'),
-                'symbol': crypto.get('symbol'),
-                'slug': crypto.get('slug'),
-                'num_market_pairs': crypto.get('num_market_pairs'),
-                'date_added': crypto.get('date_added'),
-                'max_supply': crypto.get('max_supply'),
-                'circulating_supply': crypto.get('circulating_supply'),
-                'total_supply': crypto.get('total_supply'),
-                'cmc_rank': crypto.get('cmc_rank'),
-                'last_updated': crypto.get('last_updated'),
-                'price_usd': quote_usd.get('price'),
-                'volume_24h_usd': quote_usd.get('volume_24h'),
-                'volume_change_24h': quote_usd.get('volume_change_24h'),
-                'percent_change_1h': quote_usd.get('percent_change_1h'),
-                'percent_change_24h': quote_usd.get('percent_change_24h'),
-                'percent_change_7d': quote_usd.get('percent_change_7d'),
-                'percent_change_30d': quote_usd.get('percent_change_30d'),
-                'percent_change_60d': quote_usd.get('percent_change_60d'),
-                'percent_change_90d': quote_usd.get('percent_change_90d'),
-                'market_cap_usd': quote_usd.get('market_cap'),
-                'market_cap_dominance': quote_usd.get('market_cap_dominance'),
-                'fully_diluted_market_cap': quote_usd.get('fully_diluted_market_cap'),
-            }
-            
+            row = create_csv_row(crypto, idx)
             writer.writerow(row)
     
     logger.info(f"✓ Latest data also saved to {latest_filepath}")
